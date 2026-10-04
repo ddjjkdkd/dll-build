@@ -117,11 +117,11 @@ jobs:
           # 只编 Release：写 release-only triplet，跳过 debug 构建（时间约省一半）
           New-Item -ItemType Directory -Force 'C:\vcpkg\triplets\community' | Out-Null
           Set-Content -Path 'C:\vcpkg\triplets\community\x64-windows-release.cmake' -Value @'
-set(VCPKG_TARGET_ARCHITECTURE x64)
-set(VCPKG_CRT_LINKAGE dynamic)
-set(VCPKG_LIBRARY_LINKAGE dynamic)
-set(VCPKG_BUILD_TYPE release)
-'@ -Encoding ascii
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE dynamic)
+          set(VCPKG_BUILD_TYPE release)
+          '@ -Encoding ascii
           vcpkg install boost-random embree freetype tbb:x64-windows-release --clean-after-build
           Write-Host '---- installed vcpkg DLLs (boost/embree/freetype/tbb) ----'
           Get-ChildItem 'C:\vcpkg\installed\x64-windows-release\bin\*.dll' -ErrorAction SilentlyContinue |
