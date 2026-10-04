@@ -53,27 +53,29 @@ jobs:
           $ErrorActionPreference = 'Stop'
 
           # --- zlib: 找到实际产物并改名为 zlib1.dll ---
+          $zroot = 'build-zlib'
           $zdir = 'build-zlib/Release'
           if (-not (Test-Path "$zdir/zlib1.dll")) {
-            $src = Get-ChildItem $zdir -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+            $src = Get-ChildItem $zroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
               Where-Object { $_.Name -match '^(z|libz|zlib1)\.dll$' } |
               Select-Object -First 1
             if (-not $src) {
-              $list = (Get-ChildItem $zdir -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
-              throw "zlib DLL not found under $zdir`nDLLs found:`n$list"
+              $list = (Get-ChildItem $zroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
+              throw "zlib DLL not found under $zroot`nDLLs found:`n$list"
             }
             Move-Item $src.FullName "$zdir/zlib1.dll"
           }
 
           # --- zstd: 找到实际产物并改名为 libzstd.dll ---
+          $sroot = 'build-zstd'
           $sdir = 'build-zstd/Release'
           if (-not (Test-Path "$sdir/libzstd.dll")) {
-            $src = Get-ChildItem $sdir -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
+            $src = Get-ChildItem $sroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
               Where-Object { $_.Name -match 'zstd.*\.dll$' } |
               Select-Object -First 1
             if (-not $src) {
-              $list = (Get-ChildItem $sdir -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
-              throw "zstd DLL not found under $sdir`nDLLs found:`n$list"
+              $list = (Get-ChildItem $sroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
+              throw "zstd DLL not found under $sroot`nDLLs found:`n$list"
             }
             Move-Item $src.FullName "$sdir/libzstd.dll"
           }
