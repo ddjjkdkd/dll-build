@@ -15,7 +15,8 @@
 #     freetype.dll、tbb12.dll 等）
 #   - vcpkg 用 release-only 三元组（VCPKG_BUILD_TYPE=release），只编 Release，省约一半时间
 #   - vcpkg installed + downloads 走 Actions 缓存，key 为 registry git 版本号：没更新时秒过
-#   - vmm.dll 从 MemProcFS 源码（github.com/ulfrisk/MemProcFS）用 MSBuild 编译
+#   - vmm.dll 从 MemProcFS 源码（github.com/ufrisk/MemProcFS）用 MSBuild 编译，
+#     先克隆同级 LeechCore 编出 leechcore.lib 供链接，只编 vmm 工程（避开 Python 工具依赖）
 #   - 显式打开共享库开关（ZLIB_BUILD_SHARED / ZSTD_BUILD_SHARED），避免上游改默认值
 #   - 导入库与 DLL 名天然一致（z.lib / zstd.lib），无需重新生成
 #   - 内置校验：PE 架构必须为 x64，并用 ctypes 实际加载两个 DLL 做冒烟测试和版本断言
@@ -122,7 +123,7 @@ jobs:
           set(VCPKG_LIBRARY_LINKAGE dynamic)
           set(VCPKG_BUILD_TYPE release)
           '@ -Encoding ascii
-          vcpkg install boost-random embree freetype tbb:x64-windows-release --clean-after-build
+          vcpkg install boost-random:x64-windows-release embree:x64-windows-release freetype:x64-windows-release tbb:x64-windows-release --clean-after-build
           Write-Host '---- installed vcpkg DLLs (boost/embree/freetype/tbb) ----'
           Get-ChildItem 'C:\vcpkg\installed\x64-windows-release\bin\*.dll' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^(boost|embree|freetype|tbb)' } | ForEach-Object { Write-Host $_.FullName }
@@ -131,15 +132,23 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git clone --depth 1 https://github.com/ulfrisk/MemProcFS.git memprocfs
+          # 仓库名是 ufrisk（不是 ulfrisk）；vmm 链接需要 leechcore.lib，须先克隆同级 LeechCore
+          git clone --depth 1 https://github.com/ufrisk/MemProcFS.git memprocfs
+          git clone --depth 1 https://github.com/ufrisk/LeechCore.git LeechCore
+          # leechcore 的 PostBuild 会 copy 到 W:\bin，用 subst 造一个虚拟 W: 盘避免失败
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\w\bin" | Out-Null
+          subst W: "$env:RUNNER_TEMP\w"
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           $vs = (& $vswhere -latest -property installationPath).Trim()
           $msbuild = Join-Path $vs 'MSBuild\Current\Bin\MSBuild.exe'
-          $sln = Get-ChildItem memprocfs -Recurse -Filter *.sln |
-            Where-Object Name -match 'MemProcFS' | Select-Object -First 1
-          if (-not $sln) { $sln = Get-ChildItem memprocfs -Recurse -Filter *.sln | Select-Object -First 1 }
-          Write-Host "Building $($sln.FullName)"
-          & $msbuild $sln.FullName /m /p:Configuration=Release /p:Platform=x64 /v:minimal
+          # 强制 SolutionDir=memprocfs\：leechcore 构建后把 leechcore.lib 拷进 memprocfs\includes\lib64，
+          # vmm 再从同一路径链接；直接指定 .vcxproj 构建，避开 sln 里同名文件夹的歧义
+          $slndir = Join-Path $env:GITHUB_WORKSPACE 'memprocfs\'
+          & $msbuild LeechCore\leechcore\leechcore.vcxproj /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$slndir" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'leechcore build failed' }
+          & $msbuild memprocfs\vmm\vmm.vcxproj /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$slndir" /v:minimal
+          if ($LASTEXITCODE -ne 0) { throw 'vmm build failed' }
+          subst W: /d
           Write-Host '---- vmm.dll ----'
           Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
