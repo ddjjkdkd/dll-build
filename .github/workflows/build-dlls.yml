@@ -1,24 +1,20 @@
 # 用 GitHub Actions 在 Windows x64 (MSVC) 上编译最新的 64 位 DLL：
-#   zlib1.dll   <- zlib  v1.3.2  (https://github.com/madler/zlib)
-#   libzstd.dll <- zstd  v1.5.7  (https://github.com/facebook/zstd)
+#   zlib  v1.3.2 -> z.dll      (build-zlib/Release/)
+#   zstd  v1.5.7 -> zstd.dll   (build-zstd/lib/Release/)
 #
 # 用法：
 #   1. 建一个空仓库，把本文件放到 .github/workflows/build-dlls.yml 并 push
-#   2. 仓库 Actions 页签 -> 左侧选中本 workflow -> Run workflow（或直接等 push 触发）
+#   2. 仓库 Actions 页签 -> 左侧选中本 workflow -> Run workflow（手动触发）
 #   3. 跑完后在 run 页面底部 Artifacts 里下载 dlls-x64-... 压缩包
 #
 # 说明：
 #   - 上游源码在 job 内 clone，仓库本身不需要任何源码
-#   - 不同版本/工具链下 DLL 的实际产出名可能不同（z.dll / libz.dll / zlib1.dll /
-#     zstd.dll / libzstd.dll 等），"Normalize DLL names" 步骤不再假设文件名，
-#     会自动识别实际产物并统一改名为 zlib1.dll / libzstd.dll；
-#     若实在找不到，会打印实际存在的 DLL 清单便于定位
+#   - 不重命名 DLL：产物保持编译出的原名与路径
 #   - 显式打开共享库开关（ZLIB_BUILD_SHARED / ZSTD_BUILD_SHARED），避免上游改默认值
-#   - 改名后会基于 dumpbin /exports 重新生成导入库，保证 zlib1.lib / libzstd.lib
-#     内部引用的就是最终 DLL 名，链接后运行时不会找不到 DLL
+#   - 导入库与 DLL 名天然一致（z.lib / zstd.lib），无需重新生成
 #   - 内置校验：PE 架构必须为 x64，并用 ctypes 实际加载两个 DLL 做冒烟测试和版本断言
 
-name: Build zlib1.dll + libzstd.dll (Windows x64)
+name: Build zlib + zstd DLLs (Windows x64)
 
 on:
   workflow_dispatch:
@@ -47,69 +43,10 @@ jobs:
           cmake -S zstd/build/cmake -B build-zstd -A x64 -DZSTD_BUILD_SHARED=ON -DZSTD_BUILD_STATIC=ON -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_CONTRIB=OFF
           cmake --build build-zstd --config Release --parallel
 
-      - name: Normalize DLL names (unify to zlib1.dll / libzstd.dll)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-
-          # --- zlib: 找到实际产物并改名为 zlib1.dll ---
-          $zroot = 'build-zlib'
-          $zdir = 'build-zlib/Release'
-          if (-not (Test-Path "$zdir/zlib1.dll")) {
-            $src = Get-ChildItem $zroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match '^(z|libz|zlib1)\.dll$' } |
-              Select-Object -First 1
-            if (-not $src) {
-              $list = (Get-ChildItem $zroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
-              throw "zlib DLL not found under $zroot`nDLLs found:`n$list"
-            }
-            Move-Item $src.FullName "$zdir/zlib1.dll"
-          }
-
-          # --- zstd: 找到实际产物并改名为 libzstd.dll ---
-          $sroot = 'build-zstd'
-          $sdir = 'build-zstd/Release'
-          if (-not (Test-Path "$sdir/libzstd.dll")) {
-            $src = Get-ChildItem $sroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue |
-              Where-Object { $_.Name -match 'zstd.*\.dll$' } |
-              Select-Object -First 1
-            if (-not $src) {
-              $list = (Get-ChildItem $sroot -Recurse -Filter *.dll -ErrorAction SilentlyContinue | ForEach-Object FullName) -join "`n"
-              throw "zstd DLL not found under $sroot`nDLLs found:`n$list"
-            }
-            Move-Item $src.FullName "$sdir/libzstd.dll"
-          }
-
-      - name: Regenerate import libs matching final DLL names
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
-          $msvc = Get-ChildItem (Join-Path $vs 'VC\Tools\MSVC') -Directory | Select-Object -First 1
-          $bin = Join-Path $msvc.FullName 'bin\Hostx64\x64'
-          $dumpbin = Join-Path $bin 'dumpbin.exe'
-          $lib = Join-Path $bin 'lib.exe'
-
-          function New-ImportLib([string]$dllPath) {
-            $dir = Split-Path $dllPath
-            $base = [IO.Path]::GetFileNameWithoutExtension($dllPath)
-            $def = Join-Path $dir ($base + '.def')
-            $names = (& $dumpbin /exports $dllPath) |
-              Where-Object { $_ -match '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+\S' } |
-              ForEach-Object { ($_ -split '\s+')[3] } |
-              Where-Object { $_ -notmatch '^\.' }
-            @("LIBRARY $([IO.Path]::GetFileName($dllPath))", 'EXPORTS') + $names |
-              Set-Content $def -Encoding Ascii
-            & $lib /machine:x64 "/def:$def" "/out:$(Join-Path $dir ($base + '.lib'))"
-          }
-          New-ImportLib 'build-zlib/Release/zlib1.dll'
-          New-ImportLib 'build-zstd/Release/libzstd.dll'
-
       - name: Verify PE arch (x64) + load smoke test + version asserts
         shell: bash
         run: |
-          export PATH="$(pwd)/build-zlib/Release:$(pwd)/build-zstd/Release:$PATH"
+          export PATH="$(pwd)/build-zlib/Release:$(pwd)/build-zstd/lib/Release:$PATH"
           python - <<'PY'
           import ctypes, struct
           def pe_arch(p):
@@ -117,15 +54,15 @@ jobs:
                   f.seek(0x3c); pe = struct.unpack('<I', f.read(4))[0]
                   f.seek(pe+4); m = struct.unpack('<H', f.read(2))[0]
               return {0x8664:'x64', 0x14c:'x86', 0xaa64:'ARM64'}.get(m, '0x%04X' % m)
-          for p in ('build-zlib/Release/zlib1.dll','build-zstd/Release/libzstd.dll'):
+          for p in ('build-zlib/Release/z.dll','build-zstd/lib/Release/zstd.dll'):
               a = pe_arch(p)
               print(p, '->', a)
               assert a == 'x64', p + ' is not x64'
-          z = ctypes.CDLL('zlib1.dll'); z.zlibVersion.restype = ctypes.c_char_p
-          s = ctypes.CDLL('libzstd.dll'); s.ZSTD_versionString.restype = ctypes.c_char_p
+          z = ctypes.CDLL('z.dll'); z.zlibVersion.restype = ctypes.c_char_p
+          s = ctypes.CDLL('zstd.dll'); s.ZSTD_versionString.restype = ctypes.c_char_p
           zv = z.zlibVersion().decode(); sv = s.ZSTD_versionString().decode()
-          print('zlib1.dll  version =', zv)
-          print('libzstd.dll version =', sv)
+          print('z.dll     version =', zv)
+          print('zstd.dll  version =', sv)
           assert zv == '1.3.2' and sv == '1.5.7'
           PY
 
@@ -141,12 +78,10 @@ jobs:
         with:
           name: dlls-x64-zlib1.3.2-zstd1.5.7
           path: |
-            build-zlib/Release/zlib1.dll
-            build-zlib/Release/zlib1.lib
-            build-zlib/Release/zlib1.def
+            build-zlib/Release/z.dll
+            build-zlib/Release/z.lib
             build-zlib/Release/zs.lib
-            build-zstd/Release/libzstd.dll
-            build-zstd/Release/libzstd.lib
-            build-zstd/Release/libzstd.def
-            build-zstd/Release/zstd_static.lib
+            build-zstd/lib/Release/zstd.dll
+            build-zstd/lib/Release/zstd.lib
+            build-zstd/lib/Release/zstd_static.lib
             out/include/**
