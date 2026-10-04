@@ -46,9 +46,8 @@ jobs:
       - name: Verify PE arch (x64) + load smoke test + version asserts
         shell: bash
         run: |
-          export PATH="$(pwd)/build-zlib/Release:$(pwd)/build-zstd/lib/Release:$PATH"
           python - <<'PY'
-          import ctypes, struct
+          import ctypes, struct, os
           def pe_arch(p):
               with open(p,'rb') as f:
                   f.seek(0x3c); pe = struct.unpack('<I', f.read(4))[0]
@@ -58,8 +57,11 @@ jobs:
               a = pe_arch(p)
               print(p, '->', a)
               assert a == 'x64', p + ' is not x64'
-          z = ctypes.CDLL('z.dll'); z.zlibVersion.restype = ctypes.c_char_p
-          s = ctypes.CDLL('zstd.dll'); s.ZSTD_versionString.restype = ctypes.c_char_p
+          # Python 3.8+ 在 Windows 上不按 PATH 搜索 DLL，必须用绝对路径加载
+          z = ctypes.CDLL(os.path.abspath('build-zlib/Release/z.dll'))
+          z.zlibVersion.restype = ctypes.c_char_p
+          s = ctypes.CDLL(os.path.abspath('build-zstd/lib/Release/zstd.dll'))
+          s.ZSTD_versionString.restype = ctypes.c_char_p
           zv = z.zlibVersion().decode(); sv = s.ZSTD_versionString().decode()
           print('z.dll     version =', zv)
           print('zstd.dll  version =', sv)
