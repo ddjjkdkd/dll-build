@@ -40,6 +40,8 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write   # 创建 GitHub Release 需要
 
     steps:
       - name: Checkout (repo 只作为 workflow 载体)
@@ -135,6 +137,7 @@ jobs:
             vcpkg-
 
       - name: Build vcpkg deps (boost/embree/tbb 动态 + freetype 静态依赖, x64)
+        id: vcpkg
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -163,6 +166,19 @@ jobs:
           Write-Host '---- installed static libs (freetype 静态依赖) ----'
           Get-ChildItem 'C:\vcpkg\installed\x64-windows-static-md-release\lib\*.lib' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^(zlib|zs|libpng|bz2|brotli)' } | ForEach-Object { Write-Host $_.Name }
+          # 解析各包实际版本（Release 信息用）：vcpkg list 第二列即版本
+          $vlist = (& vcpkg list 2>$null) -join "`n"
+          function Get-VcpkgVer([string]$prefix) {
+            $m = [regex]::Match($vlist, '(?m)^' + [regex]::Escape($prefix) + ':[^\r\n]*?\s+(\S+)')
+            if ($m.Success) { return $m.Groups[1].Value } else { return 'latest' }
+          }
+          $bVer = Get-VcpkgVer 'boost-random'
+          $eVer = Get-VcpkgVer 'embree'
+          $tVer = Get-VcpkgVer 'tbb'
+          "boostVer=$bVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "embreeVer=$eVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "tbbVer=$tVer" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Host "versions: boost=$bVer embree=$eVer tbb=$tVer"
 
       # ========== 4) FreeType：源码构建，静态依赖版 ==========
 
@@ -199,6 +215,7 @@ jobs:
       # ========== 5) MemProcFS：leechcore.dll + vmm.dll ==========
 
       - name: Build LeechCore + vmm (MemProcFS, MSVC x64 Release)
+        id: memprocfs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -222,6 +239,12 @@ jobs:
           Write-Host '---- vmm.dll / leechcore.dll ----'
           Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
           Get-ChildItem memprocfs -Recurse -Filter leechcore.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          # master 无版本号，记录 short hash（Release 信息用）
+          $vmmRev = & git -C memprocfs rev-parse --short HEAD
+          $leechRev = & git -C LeechCore rev-parse --short HEAD
+          "vmmRev=$vmmRev" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          "leechRev=$leechRev" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding ascii -Append
+          Write-Host "versions: vmm=master@$vmmRev leechcore=master@$leechRev"
 
       # ========== 6) 收集 8 个 DLL + PE 校验 ==========
 
@@ -304,3 +327,36 @@ jobs:
         with:
           name: dlls-x64
           path: out/**
+
+      # ========== 8) 发布 GitHub Release（含编译版本信息） ==========
+
+      - name: Publish GitHub Release (dlls-x64.zip + 版本表)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 打包成单个 zip 作为 Release asset
+          if (Test-Path dlls-x64.zip) { Remove-Item dlls-x64.zip }
+          Compress-Archive -Path out/* -DestinationPath dlls-x64.zip -CompressionLevel Optimal
+          $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+          $tag = "dlls-$ts"
+          $body = @(
+            '## 编译版本（Windows x64, MSVC Release, 手动触发）'
+            ''
+            '| 库 | 版本 | 产物 |'
+            '|---|---|---|'
+            "| zlib | ${{ steps.latest.outputs.zlib }} | zlib1.dll |"
+            "| zstd | ${{ steps.latest.outputs.zstd }} | zstd.dll |"
+            "| Boost.Random | ${{ steps.vcpkg.outputs.boostVer }} | boost_random-*.dll |"
+            "| Embree | ${{ steps.vcpkg.outputs.embreeVer }} | embree4.dll |"
+            "| oneTBB | ${{ steps.vcpkg.outputs.tbbVer }} | tbb12.dll |"
+            "| FreeType | ${{ steps.latest.outputs.freetype }} | freetype.dll（静态依赖版，单文件） |"
+            "| MemProcFS (vmm) | master@${{ steps.memprocfs.outputs.vmmRev }} | vmm.dll |"
+            "| LeechCore | master@${{ steps.memprocfs.outputs.leechRev }} | leechcore.dll |"
+            ''
+            "构建时间：$ts（UTC+8）"
+          ) -join "`n"
+          $body | Out-File -FilePath release-body.md -Encoding utf8
+          gh release create "$tag" dlls-x64.zip --title "dlls-x64 $ts" --notes-file release-body.md
+          Write-Host "published release: $tag"
