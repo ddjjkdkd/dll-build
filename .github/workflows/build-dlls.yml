@@ -6,7 +6,7 @@
 #   zstd      最新 tag   -> zstd.dll, zstd.lib, zstd_static.lib     （CMake 源码构建）
 #   Boost.Random(1.92)  -> boost_random-vc14X-mt-x64-1_XX.dll      （vcpkg）
 #   Embree    ~4.4.1    -> embree4.dll, embree4.lib                （vcpkg）
-#   FreeType  ~2.14.3   -> freetype.dll, freetype.lib + 依赖(zlib1/bz2/libpng16/brotli 三件套)（vcpkg 默认特性）
+#   FreeType  最新 tag   -> freetype.dll, freetype.lib              （源码构建·静态依赖版：zlib/libpng/bzip2/brotli 内嵌，单文件可用）
 #   oneTBB    ~2023.1   -> tbb12.dll, tbbmalloc.dll, tbb12.lib     （vcpkg）
 #   MemProcFS master    -> vmm.dll, vmm.lib                        （MSBuild 源码构建）
 #   LeechCore 最新      -> leechcore.dll, leechcore.lib            （MSBuild 源码构建，vmm 链接依赖）
@@ -49,7 +49,7 @@ jobs:
 
       # ========== 1) zlib + zstd：CMake 源码构建 ==========
 
-      - name: Resolve latest zlib/zstd tags (git ls-remote, 不走 API 避免限流)
+      - name: Resolve latest zlib/zstd/freetype tags (git ls-remote, 不走 API 避免限流)
         id: latest
         shell: bash
         run: |
@@ -57,10 +57,14 @@ jobs:
           # 还有 v1.5.7-kernel 这类变体，都会干扰排序），再去掉 peel 的 ^{} 行
           ZLIB_TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/madler/zlib.git | grep -E 'refs/tags/v[0-9][0-9.]*$' | grep -v '\^{}' | head -1 | awk '{print $2}' | sed 's#refs/tags/##')
           ZSTD_TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/facebook/zstd.git | grep -E 'refs/tags/v[0-9][0-9.]*$' | grep -v '\^{}' | head -1 | awk '{print $2}' | sed 's#refs/tags/##')
-          if [ -z "$ZLIB_TAG" ] || [ -z "$ZSTD_TAG" ]; then echo "::error::failed to resolve latest tags"; exit 1; fi
+          # FreeType 的 tag 是 VER-2-14-3 格式（大写 VER + 短横线）；旧 tag 有 VER-2-BETA2 等干扰项，
+          # 用 VER-2-[0-9][0-9-]* 过滤只留正式发布版
+          FT_TAG=$(git ls-remote --tags --sort=-v:refname https://github.com/freetype/freetype.git | grep -E 'refs/tags/VER-2-[0-9][0-9-]*$' | grep -v '\^{}' | head -1 | awk '{print $2}' | sed 's#refs/tags/##')
+          if [ -z "$ZLIB_TAG" ] || [ -z "$ZSTD_TAG" ] || [ -z "$FT_TAG" ]; then echo "::error::failed to resolve latest tags"; exit 1; fi
           echo "zlib=$ZLIB_TAG" >> "$GITHUB_OUTPUT"
           echo "zstd=$ZSTD_TAG" >> "$GITHUB_OUTPUT"
-          echo "resolved zlib=$ZLIB_TAG zstd=$ZSTD_TAG"
+          echo "freetype=$FT_TAG" >> "$GITHUB_OUTPUT"
+          echo "resolved zlib=$ZLIB_TAG zstd=$ZSTD_TAG freetype=$FT_TAG"
 
       - name: 'Clone zlib (latest: ${{ steps.latest.outputs.zlib }})'
         run: git clone --depth 1 --branch ${{ steps.latest.outputs.zlib }} https://github.com/madler/zlib.git zlib
@@ -113,7 +117,7 @@ jobs:
           Copy-Item zlib/zlib.h, build-zlib/zconf.h out/include/zlib/
           Copy-Item zstd/lib/zstd.h, zstd/lib/zdict.h, zstd/lib/zstd_errors.h out/include/zstd/
 
-      # ========== 2) vcpkg：Boost.Random / Embree / FreeType / TBB ==========
+      # ========== 2) vcpkg：Boost.Random / Embree / TBB（动态）+ FreeType 静态依赖 ==========
 
       - name: Prepare vcpkg (clone if missing, pull registry, record rev)
         id: prepare-vcpkg
@@ -143,7 +147,7 @@ jobs:
           restore-keys: |
             vcpkg-
 
-      - name: Build vcpkg DLLs (Boost/Embree/FreeType/TBB, x64-windows-release)
+      - name: Build vcpkg DLLs (Boost/Embree/TBB 动态 + FreeType 静态依赖, x64)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -156,11 +160,48 @@ jobs:
           set(VCPKG_LIBRARY_LINKAGE dynamic)
           set(VCPKG_BUILD_TYPE release)
           '@ -Encoding ascii
-          # 注意：triplet 后缀必须四个包各自带，只挂最后一个会导致其它包编 debug+release 双份
-          vcpkg install boost-random:x64-windows-release embree:x64-windows-release freetype:x64-windows-release tbb:x64-windows-release --clean-after-build
-          Write-Host '---- installed vcpkg DLLs (boost/embree/freetype/tbb) ----'
+          # FreeType 静态依赖用的 triplet：静态库 + /MD 动态 CRT（与 freetype.dll 本体保持一致）
+          Set-Content -Path 'C:\vcpkg\triplets\community\x64-windows-static-md-release.cmake' -Value @'
+          set(VCPKG_TARGET_ARCHITECTURE x64)
+          set(VCPKG_CRT_LINKAGE dynamic)
+          set(VCPKG_LIBRARY_LINKAGE static)
+          set(VCPKG_BUILD_TYPE release)
+          '@ -Encoding ascii
+          # 注意：triplet 后缀必须每个包各自带，只挂最后一个会导致其它包编 debug+release 双份
+          vcpkg install boost-random:x64-windows-release embree:x64-windows-release tbb:x64-windows-release `
+            zlib:x64-windows-static-md-release libpng:x64-windows-static-md-release bzip2:x64-windows-static-md-release brotli:x64-windows-static-md-release --clean-after-build
+          Write-Host '---- installed vcpkg DLLs (boost/embree/tbb) ----'
           Get-ChildItem 'C:\vcpkg\installed\x64-windows-release\bin\*.dll' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^(boost|embree|freetype|tbb)' } | ForEach-Object { Write-Host $_.FullName }
+            Where-Object { $_.Name -match '^(boost|embree|tbb)' } | ForEach-Object { Write-Host $_.FullName }
+          Write-Host '---- installed static libs (freetype 静态依赖) ----'
+          Get-ChildItem 'C:\vcpkg\installed\x64-windows-static-md-release\lib\*.lib' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(zlib|libpng|bz2|brotli)' } | ForEach-Object { Write-Host $_.Name }
+
+      # ========== 2.5) FreeType：源码构建，静态依赖版 ==========
+
+      - name: 'Clone freetype (latest: ${{ steps.latest.outputs.freetype }})'
+        run: git clone --depth 1 --branch ${{ steps.latest.outputs.freetype }} https://github.com/freetype/freetype.git freetype
+
+      - name: Build FreeType (static deps 静态依赖版, MSVC x64 Release)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sp = 'C:\vcpkg\installed\x64-windows-static-md-release'
+          # 静态依赖版：zlib/libpng/bzip2/brotli 全部以静态库链进 freetype.dll
+          # -> 单文件可用，不再需要外部依赖 DLL（与官方分发版行为一致）
+          # -DFT_REQUIRE_* 强制启用四依赖；bzip2 无 CMake config，用 FindBZip2 变量显式指定
+          cmake -S freetype -B build-freetype -A x64 `
+            -DBUILD_SHARED_LIBS=ON `
+            -DCMAKE_PREFIX_PATH="$sp" `
+            -DFT_REQUIRE_ZLIB=ON -DFT_REQUIRE_PNG=ON -DFT_REQUIRE_BZIP2=ON -DFT_REQUIRE_BROTLI=ON `
+            -DFT_DISABLE_HARFBUZZ=ON `
+            -DBZIP2_INCLUDE_DIR="$sp\include" -DBZIP2_LIBRARY="$sp\lib\bz2.lib" `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
+          if ($LASTEXITCODE -ne 0) { throw 'freetype cmake configure failed' }
+          cmake --build build-freetype --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'freetype build failed' }
+          Get-ChildItem build-freetype/Release/freetype.dll, build-freetype/Release/freetype.lib |
+            ForEach-Object { Write-Host $_.FullName }
 
       # ========== 3) MemProcFS：vmm.dll ==========
 
@@ -198,11 +239,14 @@ jobs:
           # vcpkg 产物（installed\x64-windows-release 下）
           $bin = 'C:\vcpkg\installed\x64-windows-release\bin'
           $lib = 'C:\vcpkg\installed\x64-windows-release\lib'
-          Copy-Item "$bin\boost*.dll", "$bin\embree*.dll", "$bin\freetype*.dll", "$bin\tbb*.dll" out/ -ErrorAction SilentlyContinue
-          # FreeType 依赖 DLL（vcpkg 默认特性动态链接需要）：
-          # zlib1（注意是 vcpkg 命名，与单独编的 z.dll 不同文件）/ bz2（vcpkg bzip2 输出名就是 bz2.dll）/ libpng16 / brotlidec / brotlicommon / brotlienc
-          Copy-Item "$bin\zlib1.dll", "$bin\bz2.dll", "$bin\libpng16.dll", "$bin\brotlidec.dll", "$bin\brotlicommon.dll", "$bin\brotlienc.dll" out/ -ErrorAction SilentlyContinue
-          Copy-Item "$lib\boost*.lib", "$lib\embree*.lib", "$lib\freetype*.lib", "$lib\tbb*.lib" out/ -ErrorAction SilentlyContinue
+          Copy-Item "$bin\boost*.dll", "$bin\embree*.dll", "$bin\tbb*.dll" out/ -ErrorAction SilentlyContinue
+          Copy-Item "$lib\boost*.lib", "$lib\embree*.lib", "$lib\tbb*.lib" out/ -ErrorAction SilentlyContinue
+          # FreeType：源码构建的静态依赖版（依赖已内嵌，单文件可用，无需 zlib1/bz2/libpng/brotli 外部 DLL）
+          $ftdll = Get-ChildItem build-freetype/Release -Filter 'freetype*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+          $ftlib = Get-ChildItem build-freetype/Release -Filter 'freetype*.lib' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notmatch '\.dll' } | Select-Object -First 1
+          if ($ftdll) { Copy-Item $ftdll.FullName 'out/freetype.dll' } else { throw 'freetype.dll not found' }
+          if ($ftlib) { Copy-Item $ftlib.FullName 'out/freetype.lib' } else { throw 'freetype.lib not found' }
           # MemProcFS 产物（memprocfs\files\x64\ 下）
           $vmm = Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($vmm) { Copy-Item $vmm.FullName 'out/vmm.dll' }
