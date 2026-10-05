@@ -187,14 +187,22 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $sp = 'C:\vcpkg\installed\x64-windows-static-md-release'
-          # 静态依赖版：zlib/libpng/bzip2/brotli 全部以静态库链进 freetype.dll
-          # -> 单文件可用，不再需要外部依赖 DLL（与官方分发版行为一致）
-          # -DFT_REQUIRE_* 强制启用四依赖；bzip2 无 CMake config，用 FindBZip2 变量显式指定
+          # 应用 vcpkg 官方 freetype 端口补丁（与 vcpkg 构建配方一致）：
+          #   brotli-static.patch = 让 freetype 的 FindBrotliDec 同时链接 brotlicommon 静态库（必须）
+          #   bzip2.patch         = 仅修正 pkgconfig 文件（保险起见一并应用）
+          curl.exe -sL -o "$env:RUNNER_TEMP\brotli-static.patch" https://raw.githubusercontent.com/microsoft/vcpkg/master/ports/freetype/brotli-static.patch
+          curl.exe -sL -o "$env:RUNNER_TEMP\bzip2.patch" https://raw.githubusercontent.com/microsoft/vcpkg/master/ports/freetype/bzip2.patch
+          git -C freetype apply "$env:RUNNER_TEMP\brotli-static.patch"
+          git -C freetype apply "$env:RUNNER_TEMP\bzip2.patch"
+          # 静态依赖版：zlib/libpng/bzip2/brotli 全部以静态库链进 freetype.dll -> 单文件可用
+          # PNG/ZLIB 模块 FindPNG/FindZLIB 会直接采用显式 cache 变量；BrotliDec 走项目内 FindBrotliDec.cmake（已打补丁）
           cmake -S freetype -B build-freetype -A x64 `
             -DBUILD_SHARED_LIBS=ON `
             -DCMAKE_PREFIX_PATH="$sp" `
             -DFT_REQUIRE_ZLIB=ON -DFT_REQUIRE_PNG=ON -DFT_REQUIRE_BZIP2=ON -DFT_REQUIRE_BROTLI=ON `
             -DFT_DISABLE_HARFBUZZ=ON `
+            -DZLIB_INCLUDE_DIR="$sp\include" -DZLIB_LIBRARY="$sp\lib\zlib.lib" `
+            -DPNG_PNG_INCLUDE_DIR="$sp\include" -DPNG_LIBRARY="$sp\lib\libpng16.lib" `
             -DBZIP2_INCLUDE_DIR="$sp\include" -DBZIP2_LIBRARY="$sp\lib\bz2.lib" `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL
           if ($LASTEXITCODE -ne 0) { throw 'freetype cmake configure failed' }
