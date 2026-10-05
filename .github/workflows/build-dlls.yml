@@ -6,9 +6,9 @@
 #   zstd      最新 tag   -> zstd.dll, zstd.lib, zstd_static.lib     （CMake 源码构建）
 #   Boost.Random(1.92)  -> boost_random-vc14X-mt-x64-1_XX.dll      （vcpkg）
 #   Embree    ~4.4.1    -> embree4.dll, embree4.lib                （vcpkg）
-#   FreeType  ~2.14.3   -> freetype.dll, freetype.lib              （vcpkg）
+#   FreeType  ~2.14.3   -> freetype.dll, freetype.lib + 依赖(zlib1/libbz2/libpng16/brotli 三件套)（vcpkg 默认特性）
 #   oneTBB    ~2023.1   -> tbb12.dll, tbbmalloc.dll, tbb12.lib     （vcpkg）
-#   MemProcFS ~4.1.x    -> vmm.dll, vmm.lib                        （MSBuild 源码构建）
+#   MemProcFS master    -> vmm.dll, vmm.lib                        （MSBuild 源码构建）
 #   LeechCore 最新      -> leechcore.dll, leechcore.lib            （MSBuild 源码构建，vmm 链接依赖）
 #
 # 用法：
@@ -199,6 +199,9 @@ jobs:
           $bin = 'C:\vcpkg\installed\x64-windows-release\bin'
           $lib = 'C:\vcpkg\installed\x64-windows-release\lib'
           Copy-Item "$bin\boost*.dll", "$bin\embree*.dll", "$bin\freetype*.dll", "$bin\tbb*.dll" out/ -ErrorAction SilentlyContinue
+          # FreeType 依赖 DLL（vcpkg 默认特性动态链接需要）：
+          # zlib1（注意是 vcpkg 命名，与单独编的 z.dll 不同文件）/ libbz2 / libpng16 / brotlidec / brotlicommon / brotlienc
+          Copy-Item "$bin\zlib1.dll", "$bin\libbz2.dll", "$bin\libpng16.dll", "$bin\brotlidec.dll", "$bin\brotlicommon.dll", "$bin\brotlienc.dll" out/ -ErrorAction SilentlyContinue
           Copy-Item "$lib\boost*.lib", "$lib\embree*.lib", "$lib\freetype*.lib", "$lib\tbb*.lib" out/ -ErrorAction SilentlyContinue
           # MemProcFS 产物（memprocfs\files\x64\ 下）
           $vmm = Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | Select-Object -First 1
