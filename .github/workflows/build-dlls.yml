@@ -1,15 +1,15 @@
 # =====================================================================
 # 用 GitHub Actions 在 Windows x64 (MSVC) 上编译最新 64 位 DLL，产物打包上传。
 #
-# 最终压缩包（dlls-x64）包含：
-#   zlib      最新 tag   -> z.dll, z.lib, zs.lib                    （CMake 源码构建）
-#   zstd      最新 tag   -> zstd.dll, zstd.lib, zstd_static.lib     （CMake 源码构建）
-#   Boost.Random(1.92)  -> boost_random-vc14X-mt-x64-1_XX.dll      （vcpkg）
-#   Embree    ~4.4.1    -> embree4.dll, embree4.lib                （vcpkg）
-#   FreeType  最新 tag   -> freetype.dll, freetype.lib              （源码构建·静态依赖版：zlib/libpng/bzip2/brotli 内嵌，单文件可用）
-#   oneTBB    ~2023.1   -> tbb12.dll, tbbmalloc.dll, tbb12.lib     （vcpkg）
-#   MemProcFS master    -> vmm.dll, vmm.lib                        （MSBuild 源码构建）
-#   LeechCore 最新      -> leechcore.dll, leechcore.lib            （MSBuild 源码构建，vmm 链接依赖）
+# 最终压缩包（dlls-x64）只包含以下 8 个 DLL（+ 配套 .lib / 头文件）：
+#   zlib1.dll      ← zlib 最新 tag，源码构建（CMake 输出 z.dll，collect 时改名为官方分发名 zlib1.dll）
+#   zstd.dll       ← zstd 最新 tag，源码构建
+#   boost_random-*.dll  ← vcpkg 最新 boost-random
+#   embree4.dll    ← vcpkg 最新 embree（依赖 tbb12.dll，包内已配齐）
+#   tbb12.dll      ← vcpkg 最新 oneTBB
+#   freetype.dll   ← freetype 最新 tag，源码构建·静态依赖版（zlib/libpng/bzip2/brotli 内嵌，单文件可用）
+#   vmm.dll        ← MemProcFS master
+#   leechcore.dll  ← LeechCore master（vmm 链接依赖，包内已配齐）
 #
 # 用法：
 #   1. 建一个空仓库，把本文件放到 .github/workflows/build-dlls.yml 并 push
@@ -17,24 +17,22 @@
 #   3. 跑完后在 run 页面底部 Artifacts 里下载 dlls-x64 压缩包
 #
 # 设计要点：
-#   - 仓库本身不需要任何源码，上游全部在 job 内 clone；DLL 不重命名，保持编译原名
-#   - zlib/zstd 每次运行先用 git ls-remote 自动取最新 tag（不走 api.github.com，
+#   - 仓库本身不需要任何源码，上游全部在 job 内 clone
+#   - zlib/zstd/freetype 每次运行先用 git ls-remote 自动取最新 tag（不走 api.github.com，
 #     避免匿名限流 403）；想锁版本可改回 clone 时写死 tag
-#   - zlib/zstd 显式打开共享库开关（ZLIB_BUILD_SHARED / ZSTD_BUILD_SHARED），
-#     避免上游修改默认值导致意外变静态库
 #   - vcpkg 只编 Release：自定义三元组 x64-windows-release（VCPKG_BUILD_TYPE=release），
-#     四个包各自带 :x64-windows-release 后缀（后缀只挂一个包会导致其它包编 debug+release 双份），
-#     跳过 debug，时间约省一半
+#     各包自带 :x64-windows-release 后缀（后缀只挂一个包会导致其它包编 debug+release 双份）
+#   - FreeType 静态依赖用独立三元组 x64-windows-static-md-release（静态库 + /MD CRT），
+#     构建用；4 个依赖包只作为构建依赖，不进产物
 #   - vcpkg installed + downloads 走 Actions 缓存，key=registry git 版本号：
 #     registry 没更新 -> 命中秒过；更新 -> 回退旧缓存，只重编有变化的包
 #   - vmm.dll 链接需要 leechcore.lib：先克隆同级 ufrisk/LeechCore 编译，
 #     再直接编 memprocfs\vmm\vmm.vcxproj（强制 SolutionDir 指向 memprocfs\），
-#     避开 MemProcFS.sln 里同名文件夹的 /t: 歧义和 vmmpyc 的 Python 工具依赖；
-#     leechcore.dll/.lib 与 vmm 同次构建，一并收集进产物
-#   - 内置校验：zlib/zstd 两个核心 DLL 做 PE=x64 + ctypes 加载 + 版本断言
+#     避开 MemProcFS.sln 里同名文件夹的 /t: 歧义和 vmmpyc 的 Python 工具依赖
+#   - 内置校验：zlib/zstd 做 ctypes 加载 + 版本断言；collect 后对全部 DLL 做 PE=x64 检查
 # =====================================================================
 
-name: Build Windows x64 DLLs (all)
+name: 'Build Windows x64 DLLs (8: zlib1 zstd boost_random embree4 tbb12 freetype vmm leechcore)'
 
 on:
   workflow_dispatch:   # 仅手动触发，不自动跑
@@ -47,9 +45,9 @@ jobs:
       - name: Checkout (repo 只作为 workflow 载体)
         uses: actions/checkout@v7.0.1
 
-      # ========== 1) zlib + zstd：CMake 源码构建 ==========
+      # ========== 1) 取最新 tag + 克隆源码（zlib / zstd / freetype） ==========
 
-      - name: Resolve latest zlib/zstd/freetype tags (git ls-remote, 不走 API 避免限流)
+      - name: Resolve latest tags + clone sources (zlib/zstd/freetype)
         id: latest
         shell: bash
         run: |
@@ -65,20 +63,16 @@ jobs:
           echo "zstd=$ZSTD_TAG" >> "$GITHUB_OUTPUT"
           echo "freetype=$FT_TAG" >> "$GITHUB_OUTPUT"
           echo "resolved zlib=$ZLIB_TAG zstd=$ZSTD_TAG freetype=$FT_TAG"
+          git clone --depth 1 --branch "$ZLIB_TAG" https://github.com/madler/zlib.git zlib
+          git clone --depth 1 --branch "$ZSTD_TAG" https://github.com/facebook/zstd.git zstd
+          git clone --depth 1 --branch "$FT_TAG" https://github.com/freetype/freetype.git freetype
 
-      - name: 'Clone zlib (latest: ${{ steps.latest.outputs.zlib }})'
-        run: git clone --depth 1 --branch ${{ steps.latest.outputs.zlib }} https://github.com/madler/zlib.git zlib
+      # ========== 2) zlib + zstd：CMake 源码构建 ==========
 
-      - name: 'Clone zstd (latest: ${{ steps.latest.outputs.zstd }})'
-        run: git clone --depth 1 --branch ${{ steps.latest.outputs.zstd }} https://github.com/facebook/zstd.git zstd
-
-      - name: Build zlib (MSVC x64 Release)
+      - name: Build zlib + zstd (MSVC x64 Release)
         run: |
           cmake -S zlib -B build-zlib -A x64 -DZLIB_BUILD_SHARED=ON -DZLIB_BUILD_TESTING=OFF
           cmake --build build-zlib --config Release --parallel
-
-      - name: Build zstd (MSVC x64 Release)
-        run: |
           cmake -S zstd/build/cmake -B build-zstd -A x64 -DZSTD_BUILD_SHARED=ON -DZSTD_BUILD_STATIC=ON -DZSTD_BUILD_PROGRAMS=OFF -DZSTD_BUILD_TESTS=OFF -DZSTD_BUILD_CONTRIB=OFF
           cmake --build build-zstd --config Release --parallel
 
@@ -110,14 +104,7 @@ jobs:
           assert zv == os.environ['ZLIB_TAG'].lstrip('v') and sv == os.environ['ZSTD_TAG'].lstrip('v')
           PY
 
-      - name: Collect headers (zlib/zstd)
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force out/include/zlib, out/include/zstd | Out-Null
-          Copy-Item zlib/zlib.h, build-zlib/zconf.h out/include/zlib/
-          Copy-Item zstd/lib/zstd.h, zstd/lib/zdict.h, zstd/lib/zstd_errors.h out/include/zstd/
-
-      # ========== 2) vcpkg：Boost.Random / Embree / TBB（动态）+ FreeType 静态依赖 ==========
+      # ========== 3) vcpkg：构建依赖（boost/embree/tbb 动态 + freetype 静态依赖） ==========
 
       - name: Prepare vcpkg (clone if missing, pull registry, record rev)
         id: prepare-vcpkg
@@ -147,7 +134,7 @@ jobs:
           restore-keys: |
             vcpkg-
 
-      - name: Build vcpkg DLLs (Boost/Embree/TBB 动态 + FreeType 静态依赖, x64)
+      - name: Build vcpkg deps (boost/embree/tbb 动态 + freetype 静态依赖, x64)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -177,10 +164,7 @@ jobs:
           Get-ChildItem 'C:\vcpkg\installed\x64-windows-static-md-release\lib\*.lib' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^(zlib|zs|libpng|bz2|brotli)' } | ForEach-Object { Write-Host $_.Name }
 
-      # ========== 2.5) FreeType：源码构建，静态依赖版 ==========
-
-      - name: 'Clone freetype (latest: ${{ steps.latest.outputs.freetype }})'
-        run: git clone --depth 1 --branch ${{ steps.latest.outputs.freetype }} https://github.com/freetype/freetype.git freetype
+      # ========== 4) FreeType：源码构建，静态依赖版 ==========
 
       - name: Build FreeType (static deps 静态依赖版, MSVC x64 Release)
         shell: pwsh
@@ -212,9 +196,9 @@ jobs:
           Get-ChildItem build-freetype/Release/freetype.dll, build-freetype/Release/freetype.lib |
             ForEach-Object { Write-Host $_.FullName }
 
-      # ========== 3) MemProcFS：vmm.dll ==========
+      # ========== 5) MemProcFS：leechcore.dll + vmm.dll ==========
 
-      - name: Build MemProcFS (vmm.dll, MSVC x64 Release)
+      - name: Build LeechCore + vmm (MemProcFS, MSVC x64 Release)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -239,45 +223,84 @@ jobs:
           Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
           Get-ChildItem memprocfs -Recurse -Filter leechcore.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
-      # ========== 4) 收集与上传 ==========
+      # ========== 6) 收集 8 个 DLL + PE 校验 ==========
 
-      - name: Collect all DLLs and libs into out/
+      - name: Collect 8 DLLs into out/ + PE=x64 校验
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force out | Out-Null
-          # vcpkg 产物（installed\x64-windows-release 下）
+
+          # --- zlib：z.dll -> zlib1.dll（官方分发名），带 import lib z.lib ---
+          Copy-Item build-zlib/Release/z.dll 'out/zlib1.dll'
+          Copy-Item build-zlib/Release/z.lib 'out/z.lib' -ErrorAction SilentlyContinue
+          # zlib/zstd 头文件
+          New-Item -ItemType Directory -Force out/include/zlib, out/include/zstd | Out-Null
+          Copy-Item zlib/zlib.h, build-zlib/zconf.h out/include/zlib/
+          Copy-Item zstd/lib/zstd.h, zstd/lib/zdict.h, zstd/lib/zstd_errors.h out/include/zstd/
+
+          # --- zstd：原名 zstd.dll + import lib ---
+          Copy-Item build-zstd/lib/Release/zstd.dll 'out/zstd.dll'
+          Copy-Item build-zstd/lib/Release/zstd.lib 'out/zstd.lib' -ErrorAction SilentlyContinue
+
+          # --- vcpkg 动态产物：只收清单内的 3 个（不匹配 tbbmalloc* 等） ---
           $bin = 'C:\vcpkg\installed\x64-windows-release\bin'
           $lib = 'C:\vcpkg\installed\x64-windows-release\lib'
-          Copy-Item "$bin\boost*.dll", "$bin\embree*.dll", "$bin\tbb*.dll" out/ -ErrorAction SilentlyContinue
-          Copy-Item "$lib\boost*.lib", "$lib\embree*.lib", "$lib\tbb*.lib" out/ -ErrorAction SilentlyContinue
-          # FreeType：源码构建的静态依赖版（依赖已内嵌，单文件可用，无需 zlib1/bz2/libpng/brotli 外部 DLL）
-          $ftdll = Get-ChildItem build-freetype/Release -Filter 'freetype*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
-          $ftlib = Get-ChildItem build-freetype/Release -Filter 'freetype*.lib' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notmatch '\.dll' } | Select-Object -First 1
-          if ($ftdll) { Copy-Item $ftdll.FullName 'out/freetype.dll' } else { throw 'freetype.dll not found' }
-          if ($ftlib) { Copy-Item $ftlib.FullName 'out/freetype.lib' } else { throw 'freetype.lib not found' }
-          # MemProcFS 产物（memprocfs\files\x64\ 下）
+          $boost = Get-ChildItem $bin -Filter 'boost_random*.dll' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $boost) { throw 'boost_random.dll not found' }
+          Copy-Item $boost.FullName out/
+          Copy-Item "$lib\boost_random*.lib" out/ -ErrorAction SilentlyContinue
+          foreach ($n in 'embree4.dll', 'tbb12.dll') {
+            if (-not (Test-Path "$bin\$n")) { throw "$n not found" }
+            Copy-Item "$bin\$n" "out/$n"
+          }
+          Copy-Item "$lib\embree4.lib", "$lib\tbb12.lib" out/ -ErrorAction SilentlyContinue
+
+          # --- freetype：静态依赖版单文件 ---
+          if (-not (Test-Path 'build-freetype/Release/freetype.dll')) { throw 'freetype.dll not found' }
+          Copy-Item build-freetype/Release/freetype.dll 'out/freetype.dll'
+          Copy-Item build-freetype/Release/freetype.lib 'out/freetype.lib'
+
+          # --- MemProcFS：vmm.dll + leechcore.dll（leechcore.lib 在 files\x64\lib\） ---
           $vmm = Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($vmm) { Copy-Item $vmm.FullName 'out/vmm.dll' }
+          if (-not $vmm) { throw 'vmm.dll not found' }
+          Copy-Item $vmm.FullName 'out/vmm.dll'
           $vmmlib = Get-ChildItem memprocfs -Recurse -Filter vmm.lib -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($vmmlib) { Copy-Item $vmmlib.FullName 'out/vmm.lib' }
-          # LeechCore 产物（memprocfs\files\x64\ 下，与 vmm 同目录）
           $lc = Get-ChildItem memprocfs -Recurse -Filter leechcore.dll -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($lc) { Copy-Item $lc.FullName 'out/leechcore.dll' }
+          if (-not $lc) { throw 'leechcore.dll not found' }
+          Copy-Item $lc.FullName 'out/leechcore.dll'
           $lclib = Get-ChildItem memprocfs -Recurse -Filter leechcore.lib -ErrorAction SilentlyContinue |
             Where-Object { $_.FullName -match 'files\\x64\\lib' } | Select-Object -First 1
           if ($lclib) { Copy-Item $lclib.FullName 'out/leechcore.lib' }
-          Get-ChildItem out | ForEach-Object Name
+
+          # --- 全部 DLL 做 PE=x64 校验 ---
+          function Get-PEArch([string]$p) {
+            $fs = [System.IO.File]::OpenRead($p)
+            try {
+              $br = [System.IO.BinaryReader]::new($fs)
+              $fs.Seek(0x3C, [System.IO.SeekOrigin]::Begin) | Out-Null
+              $pe = $br.ReadInt32()
+              $fs.Seek($pe + 4, [System.IO.SeekOrigin]::Begin) | Out-Null
+              return $br.ReadUInt16()
+            } finally { $fs.Dispose() }
+          }
+          $bad = @()
+          Get-ChildItem out -Filter '*.dll' | ForEach-Object {
+            $m = Get-PEArch $_.FullName
+            $arch = if ($m -eq 0x8664) { 'x64' } elseif ($m -eq 0x14c) { 'x86' } else { ('0x{0:X}' -f $m) }
+            Write-Host ("{0,-45} {1}" -f $_.Name, $arch)
+            if ($m -ne 0x8664) { $bad += $_.Name }
+          }
+          if ($bad.Count -gt 0) { throw "非 x64 DLL: $($bad -join ', ')" }
+          Write-Host ''
+          Write-Host '---- out/ 最终内容 ----'
+          Get-ChildItem out -Recurse -File | ForEach-Object { $_.FullName.Replace("$PWD\out\", '') } | Sort-Object
+
+      # ========== 7) 上传 ==========
 
       - name: Upload artifacts (dlls-x64)
         uses: actions/upload-artifact@v7.0.1
         with:
           name: dlls-x64
-          path: |
-            build-zlib/Release/z.dll
-            build-zlib/Release/z.lib
-            build-zlib/Release/zs.lib
-            build-zstd/lib/Release/zstd.dll
-            build-zstd/lib/Release/zstd.lib
-            build-zstd/lib/Release/zstd_static.lib
-            out/**
+          path: out/**
