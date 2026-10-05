@@ -9,6 +9,7 @@
 #   FreeType  ~2.14.3   -> freetype.dll, freetype.lib              （vcpkg）
 #   oneTBB    ~2023.1   -> tbb12.dll, tbbmalloc.dll, tbb12.lib     （vcpkg）
 #   MemProcFS ~4.1.x    -> vmm.dll, vmm.lib                        （MSBuild 源码构建）
+#   LeechCore 最新      -> leechcore.dll, leechcore.lib            （MSBuild 源码构建，vmm 链接依赖）
 #
 # 用法：
 #   1. 建一个空仓库，把本文件放到 .github/workflows/build-dlls.yml 并 push
@@ -28,7 +29,8 @@
 #     registry 没更新 -> 命中秒过；更新 -> 回退旧缓存，只重编有变化的包
 #   - vmm.dll 链接需要 leechcore.lib：先克隆同级 ufrisk/LeechCore 编译，
 #     再直接编 memprocfs\vmm\vmm.vcxproj（强制 SolutionDir 指向 memprocfs\），
-#     避开 MemProcFS.sln 里同名文件夹的 /t: 歧义和 vmmpyc 的 Python 工具依赖
+#     避开 MemProcFS.sln 里同名文件夹的 /t: 歧义和 vmmpyc 的 Python 工具依赖；
+#     leechcore.dll/.lib 与 vmm 同次构建，一并收集进产物
 #   - 内置校验：zlib/zstd 两个核心 DLL 做 PE=x64 + ctypes 加载 + 版本断言
 # =====================================================================
 
@@ -183,8 +185,9 @@ jobs:
           & $msbuild memprocfs\vmm\vmm.vcxproj /p:Configuration=Release /p:Platform=x64 "/p:SolutionDir=$slndir" /v:minimal
           if ($LASTEXITCODE -ne 0) { throw 'vmm build failed' }
           subst W: /d
-          Write-Host '---- vmm.dll ----'
+          Write-Host '---- vmm.dll / leechcore.dll ----'
           Get-ChildItem memprocfs -Recurse -Filter vmm.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
+          Get-ChildItem memprocfs -Recurse -Filter leechcore.dll -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_.FullName }
 
       # ========== 4) 收集与上传 ==========
 
@@ -202,6 +205,12 @@ jobs:
           if ($vmm) { Copy-Item $vmm.FullName 'out/vmm.dll' }
           $vmmlib = Get-ChildItem memprocfs -Recurse -Filter vmm.lib -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($vmmlib) { Copy-Item $vmmlib.FullName 'out/vmm.lib' }
+          # LeechCore 产物（memprocfs\files\x64\ 下，与 vmm 同目录）
+          $lc = Get-ChildItem memprocfs -Recurse -Filter leechcore.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($lc) { Copy-Item $lc.FullName 'out/leechcore.dll' }
+          $lclib = Get-ChildItem memprocfs -Recurse -Filter leechcore.lib -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match 'files\\x64\\lib' } | Select-Object -First 1
+          if ($lclib) { Copy-Item $lclib.FullName 'out/leechcore.lib' }
           Get-ChildItem out | ForEach-Object Name
 
       - name: Upload artifacts (dlls-x64)
