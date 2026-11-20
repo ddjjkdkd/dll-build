@@ -2,7 +2,7 @@
 # 用 GitHub Actions 在 Windows x64 (MSVC) 上编译最新 64 位 DLL，产物打包上传。
 #
 # 最终压缩包（dlls-x64）只包含以下 8 个 DLL（+ 配套 .lib / 头文件）：
-#   zlib1.dll      ← zlib 最新 tag，源码构建（CMake 输出 z.dll，collect 时改名为官方分发名 zlib1.dll）
+#   zlib1.dll      ← zlib 最新 tag，源码构建（CMake 输出名随版本变：1.3.x=z.dll、1.4=libz.dll，collect 动态识别后改名 zlib1.dll）
 #   zstd.dll       ← zstd 最新 tag，源码构建
 #   boost_random-*.dll  ← vcpkg 最新 boost-random
 #   embree4.dll    ← vcpkg 最新 embree（依赖 tbb12.dll，包内已配齐）
@@ -84,6 +84,11 @@ jobs:
           ZLIB_TAG: ${{ steps.latest.outputs.zlib }}
           ZSTD_TAG: ${{ steps.latest.outputs.zstd }}
         run: |
+          # zlib 的 CMake 输出名随版本变化：1.3.x 为 z.dll，1.4 起为 libz.dll —— 动态识别，不写死
+          ZLIB_DLL=$(ls build-zlib/Release/*.dll 2>/dev/null | head -1)
+          if [ -z "$ZLIB_DLL" ]; then echo "::error::zlib DLL not found in build-zlib/Release"; exit 1; fi
+          export ZLIB_DLL
+          echo "zlib dll: $ZLIB_DLL"
           python - <<'PY'
           import ctypes, struct, os
           def pe_arch(p):
@@ -91,19 +96,23 @@ jobs:
                   f.seek(0x3c); pe = struct.unpack('<I', f.read(4))[0]
                   f.seek(pe+4); m = struct.unpack('<H', f.read(2))[0]
               return {0x8664:'x64', 0x14c:'x86', 0xaa64:'ARM64'}.get(m, '0x%04X' % m)
-          for p in ('build-zlib/Release/z.dll','build-zstd/lib/Release/zstd.dll'):
+          zp = os.environ['ZLIB_DLL']
+          for p in (zp, 'build-zstd/lib/Release/zstd.dll'):
               a = pe_arch(p)
               print(p, '->', a)
               assert a == 'x64', p + ' is not x64'
           # Python 3.8+ 在 Windows 上不按 PATH 搜索 DLL，必须用绝对路径加载
-          z = ctypes.CDLL(os.path.abspath('build-zlib/Release/z.dll'))
+          z = ctypes.CDLL(os.path.abspath(zp))
           z.zlibVersion.restype = ctypes.c_char_p
           s = ctypes.CDLL(os.path.abspath('build-zstd/lib/Release/zstd.dll'))
           s.ZSTD_versionString.restype = ctypes.c_char_p
           zv = z.zlibVersion().decode(); sv = s.ZSTD_versionString().decode()
-          print('z.dll     version =', zv)
+          print(zp, 'version =', zv)
           print('zstd.dll  version =', sv)
-          assert zv == os.environ['ZLIB_TAG'].lstrip('v') and sv == os.environ['ZSTD_TAG'].lstrip('v')
+          # 兼容版本串两种形态：1.4 与 1.4.0
+          zt = os.environ['ZLIB_TAG'].lstrip('v'); st = os.environ['ZSTD_TAG'].lstrip('v')
+          assert (zv == zt or zv.startswith(zt + '.')), 'zlib version mismatch: %s vs tag %s' % (zv, zt)
+          assert sv == st, 'zstd version mismatch: %s vs tag %s' % (sv, st)
           PY
 
       # ========== 3) vcpkg：构建依赖（boost/embree/tbb 动态 + freetype 静态依赖） ==========
@@ -265,9 +274,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force out | Out-Null
 
-          # --- zlib：z.dll -> zlib1.dll（官方分发名），带 import lib z.lib ---
-          Copy-Item build-zlib/Release/z.dll 'out/zlib1.dll'
-          Copy-Item build-zlib/Release/z.lib 'out/z.lib' -ErrorAction SilentlyContinue
+          # --- zlib：CMake 输出名随版本变化（1.3.x=z.dll，1.4=libz.dll），动态识别 -> 官方分发名 zlib1.dll；导入库统一存为 z.lib ---
+          $zlibDll = Get-ChildItem build-zlib/Release -Filter *.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $zlibDll) { throw 'zlib DLL not found in build-zlib/Release' }
+          Write-Host "zlib dll: $($zlibDll.Name) -> out/zlib1.dll"
+          Copy-Item $zlibDll.FullName 'out/zlib1.dll'
+          $zlibBase = [System.IO.Path]::GetFileNameWithoutExtension($zlibDll.Name)
+          $zlibImpLib = Join-Path $zlibDll.DirectoryName ($zlibBase + '.lib')
+          if (Test-Path $zlibImpLib) { Copy-Item $zlibImpLib 'out/z.lib' }
           # zlib/zstd 头文件
           New-Item -ItemType Directory -Force out/include/zlib, out/include/zstd | Out-Null
           Copy-Item zlib/zlib.h, build-zlib/zconf.h out/include/zlib/
